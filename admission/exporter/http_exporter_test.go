@@ -6,12 +6,7 @@ import (
 	apitypes "github.com/armosec/armoapi-go/armotypes"
 	"github.com/kubescape/operator/admission/rules"
 	rulesv1 "github.com/kubescape/operator/admission/rules/v1"
-	"github.com/kubescape/operator/objectcache"
 	"github.com/stretchr/testify/assert"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apiserver/pkg/admission"
-	"k8s.io/apiserver/pkg/authentication/user"
 )
 
 func TestInitHTTPExporter_ClusterUID(t *testing.T) {
@@ -33,32 +28,19 @@ func TestSendAdmissionAlert_ClusterUIDPropagated(t *testing.T) {
 	exporter, err := InitHTTPExporter(config, "test-cluster", nil, "test-cluster-uid")
 	assert.NoError(t, err)
 
-	event := admission.NewAttributesRecord(
-		&unstructured.Unstructured{
-			Object: map[string]interface{}{
-				"kind":       "PodExecOptions",
-				"apiVersion": "v1",
-				"command":    []interface{}{"bash"},
-				"container":  "test-container",
-			},
+	// Build a minimal rule failure to verify ClusterUID injection by the exporter.
+	ruleFailure := &rulesv1.GenericRuleFailure{
+		BaseRuntimeAlert: apitypes.BaseRuntimeAlert{},
+		RuleAlert:        apitypes.RuleAlert{},
+		AdmissionAlert:   apitypes.AdmissionAlert{},
+		RuntimeAlertK8sDetails: apitypes.RuntimeAlertK8sDetails{
+			Image:       "nginx:1.14.2",
+			ImageDigest: "nginx@sha256:abc123def456",
 		},
-		nil,
-		schema.GroupVersionKind{Kind: "PodExecOptions"},
-		"test-namespace",
-		"test-pod",
-		schema.GroupVersionResource{Resource: "pods"},
-		"exec",
-		admission.Create,
-		nil,
-		false,
-		&user.DefaultInfo{Name: "test-user", Groups: []string{"test-group"}},
-	)
+		RuleID: "R2000",
+	}
 
-	rule := rulesv1.CreateRuleR2000ExecToPod()
-	ruleFailure := rule.ProcessEvent(event, objectcache.KubernetesCacheMockImpl{})
-	assert.NotNil(t, ruleFailure)
-
-	// Simulate what SendAdmissionAlert does internally to verify ClusterUID injection
+	// Simulate what SendAdmissionAlert does internally to verify ClusterUID injection.
 	k8sDetails := ruleFailure.GetRuntimeAlertK8sDetails()
 	k8sDetails.ClusterName = exporter.ClusterName
 	k8sDetails.ClusterUID = exporter.ClusterUID

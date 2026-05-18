@@ -22,7 +22,10 @@ import (
 	"github.com/kubescape/node-agent/pkg/rulebindingmanager"
 	"github.com/kubescape/node-agent/pkg/watcher/dynamicwatcher"
 	exporters "github.com/kubescape/operator/admission/exporter"
+	admissioncel "github.com/kubescape/operator/admission/cel"
+	celrules "github.com/kubescape/operator/admission/rules/cel"
 	rulebindingcachev1 "github.com/kubescape/operator/admission/rulebinding/cache"
+	"github.com/kubescape/operator/admission/ruleswatcher"
 	"github.com/kubescape/operator/admission/rulesupdate"
 	"github.com/kubescape/operator/admission/webhook"
 	"github.com/kubescape/operator/config"
@@ -193,29 +196,38 @@ func main() {
 
 		addr := ":8443"
 
+		// CEL engine for admission rule evaluation
+		celEngine, err := admissioncel.NewAdmissionCEL()
+		if err != nil {
+			logger.L().Ctx(ctx).Fatal("failed to create admission CEL engine", helpers.Error(err))
+		}
+
+		// CRD-backed rule creator (replaces hardcoded R2000/R2001)
+		celRuleCreator := celrules.NewCelRuleCreator(celEngine)
+
 		// Create watchers
 		dWatcher := dynamicwatcher.NewWatchHandler(k8sApi, ksStorageClient.SpdxV1beta1(), operatorConfig.SkipNamespace)
 
-		// create ruleBinding cache (when rules update is enabled we ignore bindings and run all rules)
-		ruleBindingCache := rulebindingcachev1.NewCache(k8sApi, operatorConfig.RulesUpdateEnabled())
+		// create ruleBinding cache with injected rule creator
+		ruleBindingCache := rulebindingcachev1.NewCache(k8sApi, celRuleCreator, operatorConfig.RulesUpdateEnabled())
 		dWatcher.AddAdaptor(ruleBindingCache)
+
+		// Rules watcher — syncs k8s-admission rules from CRDs to the creator
+		rulesWatcher := ruleswatcher.NewRulesWatcher(k8sApi, celRuleCreator, ruleBindingCache)
+		dWatcher.AddAdaptor(rulesWatcher)
 
 		ruleBindingNotify := make(chan rulebindingmanager.RuleBindingNotify, 100)
 		ruleBindingCache.AddNotifier(&ruleBindingNotify)
 
 		admissionController := webhook.New(addr, "/etc/certs/tls.crt", "/etc/certs/tls.key", runtime.NewScheme(), webhook.NewAdmissionValidator(k8sApi, objectCache, exporter, ruleBindingCache), ruleBindingCache)
-		// Start HTTP REST server for webhook
 		go func() {
 			defer func() {
-				// Cancel the server context to stop other workers
 				serverCancel()
 			}()
-
 			err := admissionController.Run(serverContext)
 			logger.L().Ctx(ctx).Fatal("server stopped", helpers.Error(err))
 		}()
 
-		// start watching
 		dWatcher.Start(ctx)
 		defer dWatcher.Stop(ctx)
 	}

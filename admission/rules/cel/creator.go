@@ -5,6 +5,7 @@ import (
 
 	armotypes "github.com/armosec/armoapi-go/armotypes"
 	admissioncel "github.com/kubescape/operator/admission/cel"
+	"github.com/kubescape/operator/admission/rules"
 )
 
 // CelRuleCreator implements rules.RuleCreator backed by a []armotypes.RuntimeRule
@@ -14,6 +15,8 @@ type CelRuleCreator struct {
 	rules     []armotypes.RuntimeRule
 	celEngine *admissioncel.AdmissionCEL
 }
+
+var _ rules.RuleCreator = (*CelRuleCreator)(nil)
 
 // NewCelRuleCreator returns a new CelRuleCreator with no rules loaded yet.
 func NewCelRuleCreator(celEngine *admissioncel.AdmissionCEL) *CelRuleCreator {
@@ -35,7 +38,7 @@ func (c *CelRuleCreator) SyncRules(rules []armotypes.RuntimeRule) {
 
 // CreateRuleByID returns a RuleEvaluator for the rule with the given ID, or nil
 // if no matching rule exists.
-func (c *CelRuleCreator) CreateRuleByID(id string) *CelRuleEvaluator {
+func (c *CelRuleCreator) CreateRuleByID(id string) rules.RuleEvaluator {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -49,7 +52,7 @@ func (c *CelRuleCreator) CreateRuleByID(id string) *CelRuleEvaluator {
 
 // CreateRuleByName returns a RuleEvaluator for the first rule whose Name matches,
 // or nil if no matching rule exists.
-func (c *CelRuleCreator) CreateRuleByName(name string) *CelRuleEvaluator {
+func (c *CelRuleCreator) CreateRuleByName(name string) rules.RuleEvaluator {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -63,7 +66,7 @@ func (c *CelRuleCreator) CreateRuleByName(name string) *CelRuleEvaluator {
 
 // CreateRulesByTags returns evaluators for all rules that have at least one tag
 // in common with the requested tags set.
-func (c *CelRuleCreator) CreateRulesByTags(tags []string) []*CelRuleEvaluator {
+func (c *CelRuleCreator) CreateRulesByTags(tags []string) []rules.RuleEvaluator {
 	if len(tags) == 0 {
 		return nil
 	}
@@ -76,7 +79,7 @@ func (c *CelRuleCreator) CreateRulesByTags(tags []string) []*CelRuleEvaluator {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	var result []*CelRuleEvaluator
+	var result []rules.RuleEvaluator
 	for _, r := range c.rules {
 		if ruleMatchesTags(r, tagSet) {
 			result = append(result, newCelRuleEvaluator(r, c.celEngine))
@@ -86,11 +89,11 @@ func (c *CelRuleCreator) CreateRulesByTags(tags []string) []*CelRuleEvaluator {
 }
 
 // CreateAllRules returns evaluators for every loaded rule.
-func (c *CelRuleCreator) CreateAllRules() []*CelRuleEvaluator {
+func (c *CelRuleCreator) CreateAllRules() []rules.RuleEvaluator {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	result := make([]*CelRuleEvaluator, len(c.rules))
+	result := make([]rules.RuleEvaluator, len(c.rules))
 	for i, r := range c.rules {
 		result[i] = newCelRuleEvaluator(r, c.celEngine)
 	}
