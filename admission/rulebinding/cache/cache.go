@@ -137,16 +137,16 @@ func (c *RBCache) AddNotifier(n *chan rulebindingmanager.RuleBindingNotify) {
 // ------------------ watcher.Watcher methods -----------------------
 
 func (c *RBCache) AddHandler(_ context.Context, obj runtime.Object) {
-	var rbs []rulebindingmanager.RuleBindingNotify
-	if un, ok := obj.(*unstructured.Unstructured); ok {
-		ruleBinding, err := unstructuredToRuleBinding(un)
-		if err != nil {
-			logger.L().Error("failed to convert unstructured to rule binding", helpers.Error(err))
-			return
-		}
-		rbs = c.addRuleBinding(ruleBinding)
+	un, ok := obj.(*unstructured.Unstructured)
+	if !ok || !isRuleBinding(un) {
+		return
 	}
-	// notify
+	ruleBinding, err := unstructuredToRuleBinding(un)
+	if err != nil {
+		logger.L().Error("failed to convert unstructured to rule binding", helpers.Error(err))
+		return
+	}
+	rbs := c.addRuleBinding(ruleBinding)
 	for n := range c.notifiers {
 		for i := range rbs {
 			*c.notifiers[n] <- rbs[i]
@@ -155,16 +155,16 @@ func (c *RBCache) AddHandler(_ context.Context, obj runtime.Object) {
 }
 
 func (c *RBCache) ModifyHandler(_ context.Context, obj runtime.Object) {
-	var rbs []rulebindingmanager.RuleBindingNotify
-	if un, ok := obj.(*unstructured.Unstructured); ok {
-		ruleBinding, err := unstructuredToRuleBinding(un)
-		if err != nil {
-			logger.L().Error("failed to convert unstructured to rule binding", helpers.Error(err))
-			return
-		}
-		rbs = c.modifiedRuleBinding(ruleBinding)
+	un, ok := obj.(*unstructured.Unstructured)
+	if !ok || !isRuleBinding(un) {
+		return
 	}
-	// notify
+	ruleBinding, err := unstructuredToRuleBinding(un)
+	if err != nil {
+		logger.L().Error("failed to convert unstructured to rule binding", helpers.Error(err))
+		return
+	}
+	rbs := c.modifiedRuleBinding(ruleBinding)
 	for n := range c.notifiers {
 		for i := range rbs {
 			*c.notifiers[n] <- rbs[i]
@@ -173,11 +173,11 @@ func (c *RBCache) ModifyHandler(_ context.Context, obj runtime.Object) {
 }
 
 func (c *RBCache) DeleteHandler(_ context.Context, obj runtime.Object) {
-	var rbs []rulebindingmanager.RuleBindingNotify
-	if un, ok := obj.(*unstructured.Unstructured); ok {
-		rbs = c.deleteRuleBinding(uniqueName(un))
+	un, ok := obj.(*unstructured.Unstructured)
+	if !ok || !isRuleBinding(un) {
+		return
 	}
-	// notify
+	rbs := c.deleteRuleBinding(uniqueName(un))
 	for n := range c.notifiers {
 		for i := range rbs {
 			*c.notifiers[n] <- rbs[i]

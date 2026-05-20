@@ -204,6 +204,52 @@ func TestRuntimeObjAddHandler(t *testing.T) {
 	}
 }
 
+// TestHandlersIgnoreNonRuleBindingKinds verifies that AddHandler, ModifyHandler,
+// and DeleteHandler silently drop events whose Kind is not RuntimeRuleAlertBinding.
+// The dynamic watcher dispatches every event to every adaptor, so without this
+// filter the RBCache would attempt to parse Rules CRD payloads as bindings and
+// emit spurious "cannot convert int64 to string" errors.
+func TestHandlersIgnoreNonRuleBindingKinds(t *testing.T) {
+	rulesEvent := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "kubescape.io/v1",
+			"kind":       "Rules",
+			"metadata": map[string]interface{}{
+				"name":      "admission-test-rules",
+				"namespace": "kubescape",
+			},
+			"spec": map[string]interface{}{
+				"rules": []interface{}{
+					map[string]interface{}{
+						"id":       "R2000",
+						"severity": int64(8), // would fail conversion to string
+					},
+				},
+			},
+		},
+	}
+
+	t.Run("AddHandler ignores Rules CRD", func(t *testing.T) {
+		c := NewCacheMock()
+		c.AddHandler(context.Background(), rulesEvent)
+		assert.Equal(t, 0, c.rbNameToRB.Len(), "no rule binding should be stored")
+	})
+
+	t.Run("ModifyHandler ignores Rules CRD", func(t *testing.T) {
+		c := NewCacheMock()
+		c.ModifyHandler(context.Background(), rulesEvent)
+		assert.Equal(t, 0, c.rbNameToRB.Len())
+	})
+
+	t.Run("DeleteHandler ignores Rules CRD", func(t *testing.T) {
+		c := NewCacheMock()
+		// Seed a binding so we can detect spurious deletes.
+		c.rbNameToRB.Set("kubescape/admission-test-rules", typesv1.RuntimeAlertRuleBinding{})
+		c.DeleteHandler(context.Background(), rulesEvent)
+		assert.Equal(t, 1, c.rbNameToRB.Len(), "the seeded binding must not be deleted by a Rules CRD event")
+	})
+}
+
 func TestListRulesForObjectIgnoreBindings(t *testing.T) {
 	c := &RBCache{
 		k8sClient:          k8sinterface.NewKubernetesApiMock(),

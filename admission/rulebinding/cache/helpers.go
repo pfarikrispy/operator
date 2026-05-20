@@ -9,8 +9,23 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 )
 
+// ruleBindingKind is the Kind value the CRD reports for RuntimeAlertRuleBinding
+// objects. The dynamic watcher dispatches events from all watched GVRs to every
+// adaptor, so handlers in this package use this constant to drop events for
+// other CRDs (notably Rules) before attempting type conversion.
+const ruleBindingKind = "RuntimeRuleAlertBinding"
+
 func uniqueName(obj metav1.Object) string {
 	return utils.CreateK8sPodID(obj.GetNamespace(), obj.GetName())
+}
+
+// isRuleBinding reports whether the given unstructured object is a
+// RuntimeAlertRuleBinding. Returns false for nil or other Kinds.
+func isRuleBinding(obj *unstructured.Unstructured) bool {
+	if obj == nil {
+		return false
+	}
+	return obj.GetKind() == ruleBindingKind
 }
 
 func unstructuredToRuleBinding(obj *unstructured.Unstructured) (*typesv1.RuntimeAlertRuleBinding, error) {

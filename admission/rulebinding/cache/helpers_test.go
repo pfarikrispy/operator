@@ -83,6 +83,45 @@ func TestUnstructuredToRuleBinding(t *testing.T) {
 	}
 }
 
+func TestIsRuleBinding(t *testing.T) {
+	tests := []struct {
+		name string
+		obj  *unstructured.Unstructured
+		want bool
+	}{
+		{
+			name: "RuntimeRuleAlertBinding kind",
+			obj: &unstructured.Unstructured{Object: map[string]interface{}{
+				"kind": "RuntimeRuleAlertBinding",
+			}},
+			want: true,
+		},
+		{
+			name: "Rules kind (cross-talk from RulesWatcher)",
+			obj: &unstructured.Unstructured{Object: map[string]interface{}{
+				"kind": "Rules",
+			}},
+			want: false,
+		},
+		{
+			name: "missing kind",
+			obj:  &unstructured.Unstructured{Object: map[string]interface{}{}},
+			want: false,
+		},
+		{
+			name: "nil object",
+			obj:  nil,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isRuleBinding(tt.obj))
+		})
+	}
+}
+
 func TestUniqueName(t *testing.T) {
 	tests := []struct {
 		name     string
