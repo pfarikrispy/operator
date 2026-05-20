@@ -17,6 +17,15 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
+// KindAcceptor decides whether an admission Kind should be evaluated by the
+// rule pipeline. Implementations should return true for any Kind that at least
+// one currently-loaded rule could match (and true for all Kinds when no
+// static set can be determined). The validator uses this to skip work for
+// events no rule targets.
+type KindAcceptor interface {
+	Accepts(kind string) bool
+}
+
 type AdmissionValidator struct {
 	kubernetesClient *k8sinterface.KubernetesApi
 	objectCache      objectcache.ObjectCache
@@ -29,6 +38,10 @@ type AdmissionValidator struct {
 	// feedback loops from the operator's own API writes. Empty when the
 	// service account token cannot be parsed at startup.
 	selfSubject string
+
+	// kindAcceptor pre-filters admission events by Kind before they enter
+	// the evaluation pipeline. nil means accept all Kinds.
+	kindAcceptor KindAcceptor
 }
 
 func NewAdmissionValidator(kubernetesClient *k8sinterface.KubernetesApi, objectCache objectcache.ObjectCache, exporter exporters.Exporter, ruleBindingCache rulebinding.RuleBindingCache) *AdmissionValidator {
@@ -57,6 +70,13 @@ func (av *AdmissionValidator) SetSelfSubject(subject string) {
 	av.selfSubject = subject
 }
 
+// SetKindAcceptor installs the Kind pre-filter used to skip evaluation for
+// admission events no loaded rule could match. Passing nil disables the
+// pre-filter and accepts every Kind.
+func (av *AdmissionValidator) SetKindAcceptor(a KindAcceptor) {
+	av.kindAcceptor = a
+}
+
 func (av *AdmissionValidator) GetClientset() kubernetes.Interface {
 	return av.objectCache.GetKubernetesCache().GetClientset()
 }
@@ -80,6 +100,13 @@ func (av *AdmissionValidator) Validate(ctx context.Context, attrs admission.Attr
 	// processing. This is a hard guarantee against positive feedback loops,
 	// not an optimization.
 	if av.isSelfRequest(attrs) {
+		return nil
+	}
+
+	// Pre-filter on Kind: if no loaded rule could match this event, skip
+	// the entire evaluation pipeline. The acceptor falls back to wildcard
+	// when the static set cannot be determined.
+	if av.kindAcceptor != nil && !av.kindAcceptor.Accepts(attrs.GetKind().Kind) {
 		return nil
 	}
 

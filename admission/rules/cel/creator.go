@@ -11,9 +11,10 @@ import (
 // CelRuleCreator implements rules.RuleCreator backed by a []armotypes.RuntimeRule
 // that can be replaced atomically via SyncRules.
 type CelRuleCreator struct {
-	mu        sync.RWMutex
-	rules     []armotypes.RuntimeRule
-	celEngine *admissioncel.AdmissionCEL
+	mu         sync.RWMutex
+	rules      []armotypes.RuntimeRule
+	kindFilter *KindFilter
+	celEngine  *admissioncel.AdmissionCEL
 }
 
 var _ rules.RuleCreator = (*CelRuleCreator)(nil)
@@ -22,6 +23,10 @@ var _ rules.RuleCreator = (*CelRuleCreator)(nil)
 func NewCelRuleCreator(celEngine *admissioncel.AdmissionCEL) *CelRuleCreator {
 	return &CelRuleCreator{
 		celEngine: celEngine,
+		// Empty creator accepts nothing — the kind filter starts non-wildcard
+		// with an empty set so the validator drops events until the first
+		// SyncRules call. (No rules => nothing to evaluate anyway.)
+		kindFilter: &KindFilter{kinds: map[string]struct{}{}},
 	}
 }
 
@@ -30,10 +35,30 @@ func NewCelRuleCreator(celEngine *admissioncel.AdmissionCEL) *CelRuleCreator {
 func (c *CelRuleCreator) SyncRules(rules []armotypes.RuntimeRule) {
 	copied := make([]armotypes.RuntimeRule, len(rules))
 	copy(copied, rules)
+	filter := buildKindFilter(copied)
 
 	c.mu.Lock()
 	c.rules = copied
+	c.kindFilter = filter
 	c.mu.Unlock()
+}
+
+// KindFilter returns the current set of Kinds at least one loaded rule could
+// match. Used by the validator to skip evaluation for unrelated admission
+// events. The returned filter is a snapshot; callers must not mutate it.
+func (c *CelRuleCreator) KindFilter() *KindFilter {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.kindFilter
+}
+
+// Accepts reports whether at least one currently-loaded rule could match an
+// admission event of the given Kind. Always reads the latest filter snapshot,
+// so it stays correct across SyncRules calls without callers having to refresh.
+func (c *CelRuleCreator) Accepts(kind string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.kindFilter.Accepts(kind)
 }
 
 // CreateRuleByID returns a RuleEvaluator for the rule with the given ID, or nil

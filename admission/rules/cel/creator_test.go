@@ -188,6 +188,36 @@ func TestCreateAllRules_EmptySet(t *testing.T) {
 	}
 }
 
+func TestKindFilter_IsRebuiltOnSync(t *testing.T) {
+	creator := NewCelRuleCreator(newTestCelEngine(t))
+
+	// Before any SyncRules call, the filter is empty and accepts nothing.
+	// (No rules => no events to evaluate.)
+	if creator.KindFilter().Accepts("PodExecOptions") {
+		t.Error("empty creator should not accept any Kind")
+	}
+
+	// Sync a single rule pinned to PodExecOptions.
+	creator.SyncRules([]armotypes.RuntimeRule{
+		makeRule("R1", admExpr(`event.Kind == "PodExecOptions"`)),
+	})
+	f := creator.KindFilter()
+	if !f.Accepts("PodExecOptions") {
+		t.Error("after sync, PodExecOptions should be accepted")
+	}
+	if f.Accepts("Secret") {
+		t.Error("after sync of single-kind rule, Secret must not be accepted")
+	}
+
+	// Replace with a wildcard rule (no Kind constraint).
+	creator.SyncRules([]armotypes.RuntimeRule{
+		makeRule("R2", admExpr(`event.Operation == "CREATE"`)),
+	})
+	if !creator.KindFilter().IsWildcard() {
+		t.Error("after sync of wildcard rule, filter should be wildcard")
+	}
+}
+
 func TestSyncRulesReplaces(t *testing.T) {
 	creator := NewCelRuleCreator(newTestCelEngine(t))
 	creator.SyncRules(testRules)

@@ -219,7 +219,9 @@ func main() {
 		ruleBindingNotify := make(chan rulebindingmanager.RuleBindingNotify, 100)
 		ruleBindingCache.AddNotifier(&ruleBindingNotify)
 
-		admissionController := webhook.New(addr, "/etc/certs/tls.crt", "/etc/certs/tls.key", runtime.NewScheme(), webhook.NewAdmissionValidator(k8sApi, objectCache, exporter, ruleBindingCache), ruleBindingCache)
+		admissionValidator := webhook.NewAdmissionValidator(k8sApi, objectCache, exporter, ruleBindingCache)
+		admissionValidator.SetKindAcceptor(celRuleCreator)
+		admissionController := webhook.New(addr, "/etc/certs/tls.crt", "/etc/certs/tls.key", runtime.NewScheme(), admissionValidator, ruleBindingCache)
 		go func() {
 			defer func() {
 				serverCancel()

@@ -94,6 +94,63 @@ func TestValidator_SelfPodShortCircuit(t *testing.T) {
 	}
 }
 
+// stubKindAcceptor accepts only the kinds in the set.
+type stubKindAcceptor struct {
+	accepted map[string]struct{}
+}
+
+func (s stubKindAcceptor) Accepts(kind string) bool {
+	_, ok := s.accepted[kind]
+	return ok
+}
+
+func TestValidator_KindAcceptorPreFilter(t *testing.T) {
+	tests := []struct {
+		name             string
+		acceptor         KindAcceptor
+		wantCacheReached bool
+	}{
+		{
+			name:             "nil acceptor — every Kind passes through",
+			acceptor:         nil,
+			wantCacheReached: true,
+		},
+		{
+			name:             "acceptor includes NetworkPolicy — reaches cache",
+			acceptor:         stubKindAcceptor{accepted: map[string]struct{}{"NetworkPolicy": {}}},
+			wantCacheReached: true,
+		},
+		{
+			name:             "acceptor excludes NetworkPolicy — short-circuited",
+			acceptor:         stubKindAcceptor{accepted: map[string]struct{}{"Pod": {}}},
+			wantCacheReached: false,
+		},
+		{
+			name:             "empty acceptor — short-circuited",
+			acceptor:         stubKindAcceptor{accepted: map[string]struct{}{}},
+			wantCacheReached: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache := &countingRuleBindingCache{}
+			av := &AdmissionValidator{ruleBindingCache: cache}
+			av.SetKindAcceptor(tt.acceptor)
+
+			attrs := newSelfTestAttributes("kubernetes-admin")
+			if err := av.Validate(context.Background(), attrs, nil); err != nil {
+				t.Fatalf("Validate returned error: %v", err)
+			}
+
+			gotReached := cache.calls.Load() > 0
+			if gotReached != tt.wantCacheReached {
+				t.Errorf("ListRulesForObject reached=%v, want %v", gotReached, tt.wantCacheReached)
+			}
+		})
+	}
+}
+
 func TestValidator_SelfPodShortCircuit_NilUserInfo(t *testing.T) {
 	cache := &countingRuleBindingCache{}
 	av := &AdmissionValidator{
