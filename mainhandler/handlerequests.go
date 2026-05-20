@@ -13,6 +13,7 @@ import (
 	"github.com/armosec/utils-go/httputils"
 	pkgwlid "github.com/armosec/utils-k8s-go/wlid"
 	mapset "github.com/deckarep/golang-set/v2"
+	"github.com/kubescape/backend/pkg/versioncheck"
 	"github.com/kubescape/go-logger"
 	"github.com/kubescape/go-logger/helpers"
 	instanceidhandlerv1 "github.com/kubescape/k8s-interface/instanceidhandler/v1"
@@ -513,6 +514,24 @@ func (mainHandler *MainHandler) EventWorkerPool() *ants.PoolWithFunc {
 	return mainHandler.eventWorkerPool
 }
 
+func (mainHandler *MainHandler) SendReports(ctx context.Context, period time.Duration) {
+	// Clear the package-level BuildNumber so CheckLatestVersion does not emit a
+	// version-mismatch warning — the operator version is not comparable to the
+	// kubescape release track. The real build number is still sent in the request body.
+	buildNumber := versioncheck.BuildNumber
+	versioncheck.BuildNumber = ""
+	for {
+		v := versioncheck.NewVersionCheckHandler()
+		versionCheckRequest := versioncheck.NewVersionCheckRequest(
+			mainHandler.config.AccountID(), buildNumber, "", "",
+			"daily-report", mainHandler.k8sAPI.KubernetesClient)
+		err := v.CheckLatestVersion(ctx, versionCheckRequest)
+		if err != nil {
+			logger.L().Ctx(ctx).Error("failed to send daily report", helpers.Error(err))
+		}
+		time.Sleep(period)
+	}
+}
 
 func GetStartupActions(config config.IConfig) []apis.Command {
 	return []apis.Command{
