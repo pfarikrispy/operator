@@ -223,3 +223,64 @@ func TestProgramCaching(t *testing.T) {
 		t.Errorf("ProgramCacheSize = %d, want 1", size)
 	}
 }
+
+func TestRetainOnly(t *testing.T) {
+	engine, err := NewAdmissionCEL()
+	if err != nil {
+		t.Fatalf("NewAdmissionCEL: %v", err)
+	}
+	event := newExecEvent()
+	ctx := engine.CreateEvalContext(event)
+
+	// Seed three programs into the cache.
+	exprs := []string{
+		`event.Kind == "PodExecOptions"`,
+		`event.Kind == "PodPortForwardOptions"`,
+		`event.Kind == "NetworkPolicy"`,
+	}
+	for _, expr := range exprs {
+		_, err := engine.EvaluateRuleWithContext(ctx, armotypes.EventTypeK8sAdmission, []armotypes.RuleExpression{
+			{EventType: armotypes.EventTypeK8sAdmission, Expression: expr},
+		})
+		if err != nil {
+			t.Fatalf("eval %q: %v", expr, err)
+		}
+	}
+	if size := engine.ProgramCacheSize(); size != 3 {
+		t.Fatalf("after seed: ProgramCacheSize = %d, want 3", size)
+	}
+
+	// Retain only the first two — the third must be evicted.
+	engine.RetainOnly(exprs[:2])
+	if size := engine.ProgramCacheSize(); size != 2 {
+		t.Errorf("after RetainOnly([0:2]): ProgramCacheSize = %d, want 2", size)
+	}
+
+	// Re-evaluating a retained expression must not recompile (count stays).
+	_, err = engine.EvaluateRuleWithContext(ctx, armotypes.EventTypeK8sAdmission, []armotypes.RuleExpression{
+		{EventType: armotypes.EventTypeK8sAdmission, Expression: exprs[0]},
+	})
+	if err != nil {
+		t.Fatalf("re-eval retained expr: %v", err)
+	}
+	if size := engine.ProgramCacheSize(); size != 2 {
+		t.Errorf("after re-eval retained: ProgramCacheSize = %d, want 2", size)
+	}
+
+	// Re-evaluating an evicted expression must recompile (count goes up).
+	_, err = engine.EvaluateRuleWithContext(ctx, armotypes.EventTypeK8sAdmission, []armotypes.RuleExpression{
+		{EventType: armotypes.EventTypeK8sAdmission, Expression: exprs[2]},
+	})
+	if err != nil {
+		t.Fatalf("re-eval evicted expr: %v", err)
+	}
+	if size := engine.ProgramCacheSize(); size != 3 {
+		t.Errorf("after re-eval evicted: ProgramCacheSize = %d, want 3", size)
+	}
+
+	// Clearing the active set evicts everything.
+	engine.RetainOnly(nil)
+	if size := engine.ProgramCacheSize(); size != 0 {
+		t.Errorf("after RetainOnly(nil): ProgramCacheSize = %d, want 0", size)
+	}
+}

@@ -218,6 +218,65 @@ func TestKindFilter_IsRebuiltOnSync(t *testing.T) {
 	}
 }
 
+// TestSyncRules_EvictsProgramsForRemovedRules ensures the CEL engine's program
+// cache does not grow monotonically as rules come and go. After a SyncRules
+// that drops a rule, expressions referenced only by the dropped rule must be
+// evicted, while expressions still in use must survive.
+func TestSyncRules_EvictsProgramsForRemovedRules(t *testing.T) {
+	engine := newTestCelEngine(t)
+	creator := NewCelRuleCreator(engine)
+
+	// Two rules — each with its own expression, message, and uniqueID.
+	r1 := armotypes.RuntimeRule{
+		ID: "R-A",
+		Expressions: armotypes.RuleExpressions{
+			Message:  `"A: " + event.Name`,
+			UniqueID: `event.Namespace + "/A/" + event.Name`,
+			RuleExpression: []armotypes.RuleExpression{
+				{EventType: armotypes.EventTypeK8sAdmission, Expression: `event.Kind == "PodExecOptions"`},
+			},
+		},
+	}
+	r2 := armotypes.RuntimeRule{
+		ID: "R-B",
+		Expressions: armotypes.RuleExpressions{
+			Message:  `"B: " + event.Name`,
+			UniqueID: `event.Namespace + "/B/" + event.Name`,
+			RuleExpression: []armotypes.RuleExpression{
+				{EventType: armotypes.EventTypeK8sAdmission, Expression: `event.Kind == "NetworkPolicy"`},
+			},
+		},
+	}
+	creator.SyncRules([]armotypes.RuntimeRule{r1, r2})
+
+	// Force compilation of every expression by evaluating both rules.
+	evA := creator.CreateRuleByID("R-A")
+	evB := creator.CreateRuleByID("R-B")
+	attrsA := newEvalTestAttributes("PodExecOptions", "p", "ns", "CONNECT", "exec",
+		map[string]interface{}{"kind": "PodExecOptions"})
+	attrsB := newEvalTestAttributes("NetworkPolicy", "np", "ns", "CREATE", "",
+		map[string]interface{}{"kind": "NetworkPolicy"})
+	_ = evA.ProcessEvent(attrsA, nil)
+	_ = evB.ProcessEvent(attrsB, nil)
+
+	// 6 entries seeded: 2 rules × (match + message + uniqueID).
+	if got := engine.ProgramCacheSize(); got != 6 {
+		t.Fatalf("after seeding both rules: ProgramCacheSize = %d, want 6", got)
+	}
+
+	// Drop R-B; only R-A's three expressions should remain.
+	creator.SyncRules([]armotypes.RuntimeRule{r1})
+	if got := engine.ProgramCacheSize(); got != 3 {
+		t.Errorf("after dropping R-B: ProgramCacheSize = %d, want 3", got)
+	}
+
+	// Drop everything.
+	creator.SyncRules(nil)
+	if got := engine.ProgramCacheSize(); got != 0 {
+		t.Errorf("after dropping all rules: ProgramCacheSize = %d, want 0", got)
+	}
+}
+
 func TestSyncRulesReplaces(t *testing.T) {
 	creator := NewCelRuleCreator(newTestCelEngine(t))
 	creator.SyncRules(testRules)

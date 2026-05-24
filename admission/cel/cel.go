@@ -140,6 +140,27 @@ func (c *AdmissionCEL) ProgramCacheSize() int {
 	return len(c.programCache)
 }
 
+// RetainOnly drops every cached program whose expression is not in the
+// provided active set. Call this from the rule sync path after replacing the
+// rule list so programs compiled for now-removed rules are released — the
+// cache grows monotonically otherwise.
+//
+// Passing nil or an empty slice clears the entire cache.
+func (c *AdmissionCEL) RetainOnly(activeExpressions []string) {
+	active := make(map[string]struct{}, len(activeExpressions))
+	for _, expr := range activeExpressions {
+		active[expr] = struct{}{}
+	}
+
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+	for expr := range c.programCache {
+		if _, keep := active[expr]; !keep {
+			delete(c.programCache, expr)
+		}
+	}
+}
+
 // evaluateProgram compiles (or retrieves from cache) and evaluates a CEL
 // expression against the provided context.
 func (c *AdmissionCEL) evaluateProgram(expression string, evalContext map[string]any) (ref.Val, error) {

@@ -31,16 +31,44 @@ func NewCelRuleCreator(celEngine *admissioncel.AdmissionCEL) *CelRuleCreator {
 }
 
 // SyncRules replaces the internal rule set with a copy of the provided slice.
-// It is safe to call concurrently.
+// It is safe to call concurrently. After the swap, the CEL engine's program
+// cache is pruned to the expressions still referenced by the new rule set so
+// memory does not grow monotonically as rules are added and removed.
 func (c *CelRuleCreator) SyncRules(rules []armotypes.RuntimeRule) {
 	copied := make([]armotypes.RuntimeRule, len(rules))
 	copy(copied, rules)
 	filter := buildKindFilter(copied)
+	active := collectExpressions(copied)
 
 	c.mu.Lock()
 	c.rules = copied
 	c.kindFilter = filter
 	c.mu.Unlock()
+
+	if c.celEngine != nil {
+		c.celEngine.RetainOnly(active)
+	}
+}
+
+// collectExpressions returns every CEL expression string that the engine may
+// compile and cache for the given rules: each RuleExpression, plus the
+// per-rule Message and UniqueID templates.
+func collectExpressions(rs []armotypes.RuntimeRule) []string {
+	out := make([]string, 0, len(rs)*3)
+	for _, r := range rs {
+		if r.Expressions.Message != "" {
+			out = append(out, r.Expressions.Message)
+		}
+		if r.Expressions.UniqueID != "" {
+			out = append(out, r.Expressions.UniqueID)
+		}
+		for _, expr := range r.Expressions.RuleExpression {
+			if expr.Expression != "" {
+				out = append(out, expr.Expression)
+			}
+		}
+	}
+	return out
 }
 
 // KindFilter returns the current set of Kinds at least one loaded rule could
