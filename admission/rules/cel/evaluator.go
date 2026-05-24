@@ -122,12 +122,32 @@ func (e *CelRuleEvaluator) ProcessEvent(attrs admission.Attributes, access objec
 		RuleID:         e.rule.ID,
 	}
 
-	// Enrich with K8s details when a cache is available.
-	if access != nil {
+	// Enrich with K8s details when a cache is available. Skip for kinds
+	// where enrichment is not meaningful — enrichK8sDetails resolves a
+	// running Pod via clientset.CoreV1().Pods(ns).Get(...), which only
+	// makes sense for Pod CRUD or Pod subresource events. Other kinds
+	// (NetworkPolicy, RoleBinding, …) would either return a NotFound or
+	// fetch an unrelated Pod that happens to share the request name.
+	if access != nil && enrichmentApplicable(attrs) {
 		enrichK8sDetails(failure, attrs, access)
 	}
 
 	return failure
+}
+
+// enrichmentApplicable reports whether the K8s Pod enrichment pipeline makes
+// sense for this admission event. True for Pod CRUD and Pod subresources
+// (exec, portforward, attach) — all addressed by name in the pods collection.
+// False for unrelated kinds whose name does not correspond to a Pod.
+func enrichmentApplicable(attrs admission.Attributes) bool {
+	if attrs.GetResource().Resource == "pods" {
+		return true
+	}
+	switch attrs.GetKind().Kind {
+	case "PodExecOptions", "PodPortForwardOptions", "PodAttachOptions":
+		return true
+	}
+	return false
 }
 
 // buildAdmissionAlert constructs an apitypes.AdmissionAlert from admission.Attributes.

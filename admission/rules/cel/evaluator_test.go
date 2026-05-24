@@ -245,6 +245,90 @@ func TestProcessEvent_WithK8sEnrichment(t *testing.T) {
 	}
 }
 
+func TestEnrichmentApplicable(t *testing.T) {
+	tests := []struct {
+		name     string
+		kind     string
+		resource string
+		want     bool
+	}{
+		{name: "Pod CRUD", kind: "Pod", resource: "pods", want: true},
+		{name: "PodExecOptions subresource", kind: "PodExecOptions", resource: "pods", want: true},
+		{name: "PodPortForwardOptions subresource", kind: "PodPortForwardOptions", resource: "pods", want: true},
+		{name: "PodAttachOptions subresource", kind: "PodAttachOptions", resource: "pods", want: true},
+		// Kind-only matches even if resource is wrong; this guards against
+		// API-server quirks where a subresource arrives addressed differently.
+		{name: "PodExec by kind alone", kind: "PodExecOptions", resource: "", want: true},
+		{name: "NetworkPolicy CREATE", kind: "NetworkPolicy", resource: "networkpolicies", want: false},
+		{name: "RoleBinding CREATE", kind: "RoleBinding", resource: "rolebindings", want: false},
+		{name: "Secret CREATE", kind: "Secret", resource: "secrets", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gvk := schema.GroupVersionKind{Group: "", Version: "v1", Kind: tt.kind}
+			gvr := schema.GroupVersionResource{Group: "", Version: "v1", Resource: tt.resource}
+			attrs := admission.NewAttributesRecord(nil, nil, gvk, "ns", "n", gvr, "",
+				admission.Create, nil, false, nil)
+			if got := enrichmentApplicable(attrs); got != tt.want {
+				t.Errorf("enrichmentApplicable(kind=%q, resource=%q) = %v, want %v",
+					tt.kind, tt.resource, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestProcessEvent_SkipsEnrichmentForNonPodKind verifies that ProcessEvent does
+// not populate RuntimeAlertK8sDetails when the admission event is not for a
+// Pod or pod subresource. Calling enrichK8sDetails on, e.g., a NetworkPolicy
+// would resolve a Pod by the NetworkPolicy's name — at best NotFound, at
+// worst an unrelated Pod that shares the name.
+func TestProcessEvent_SkipsEnrichmentForNonPodKind(t *testing.T) {
+	engine := newTestCelEngine(t)
+	rule := armotypes.RuntimeRule{
+		ID:       "R6000",
+		Name:     "NetworkPolicy created",
+		Severity: armotypes.RuleSeverityMed,
+		Expressions: armotypes.RuleExpressions{
+			Message:  `"NetworkPolicy: " + event.Name`,
+			UniqueID: `event.Namespace + "/" + event.Name`,
+			RuleExpression: []armotypes.RuleExpression{
+				{EventType: armotypes.EventTypeK8sAdmission, Expression: `event.Kind == "NetworkPolicy"`},
+			},
+		},
+	}
+	ev := newCelRuleEvaluator(rule, engine)
+
+	gvk := schema.GroupVersionKind{Group: "networking.k8s.io", Version: "v1", Kind: "NetworkPolicy"}
+	gvr := schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies"}
+	obj := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "networking.k8s.io/v1",
+		"kind":       "NetworkPolicy",
+	}}
+	userInfo := &user.DefaultInfo{Name: "kubernetes-admin"}
+	attrs := admission.NewAttributesRecord(obj, nil, gvk, "default", "test-netpol", gvr, "",
+		admission.Create, nil, false, userInfo)
+
+	// Pass a Kubernetes cache: even though one is available, the validator
+	// must skip Pod-specific enrichment for a NetworkPolicy.
+	result := ev.ProcessEvent(attrs, objectcache.KubernetesCacheMockImpl{})
+	if result == nil {
+		t.Fatal("expected non-nil RuleFailure")
+	}
+
+	k8s := result.GetRuntimeAlertK8sDetails()
+	// Enrichment must NOT have populated Pod-derived fields.
+	if k8s.PodName != "" {
+		t.Errorf("PodName = %q, want empty (enrichment must be skipped for NetworkPolicy)", k8s.PodName)
+	}
+	if k8s.ContainerName != "" {
+		t.Errorf("ContainerName = %q, want empty", k8s.ContainerName)
+	}
+	if k8s.NodeName != "" {
+		t.Errorf("NodeName = %q, want empty", k8s.NodeName)
+	}
+}
+
 func TestProcessEvent_WrongEventType(t *testing.T) {
 	engine := newTestCelEngine(t)
 
