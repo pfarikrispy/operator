@@ -17,6 +17,7 @@ const retryInterval = 1 * time.Second
 
 var (
 	ErrMissingWLID          = fmt.Errorf("missing WLID")
+	ErrMissingWlid          = ErrMissingWLID // alias used by SBOM watcher retry path
 	ErrMissingSlug          = fmt.Errorf("missing slug")
 	ErrMissingImageTag      = fmt.Errorf("missing image ID")
 	ErrMissingImageID       = fmt.Errorf("missing image tag")
@@ -29,6 +30,7 @@ type WatchHandler struct {
 	ImageToContainerData maps.SafeMap[string, utils.ContainerData] // map of <hash> : <container data>
 	SlugToImageID        maps.SafeMap[string, string]              // map of <Slug> : string <image ID>
 	WlidAndImageID       mapset.Set[string]                        // set of <wlid+imageID>
+	sbomRetryAttempts    maps.SafeMap[string, int]                 // map of <SBOM key> : retry attempts so far
 	storageClient        kssc.Interface
 	cfg                  config.IConfig
 	k8sAPI               *k8sinterface.KubernetesApi

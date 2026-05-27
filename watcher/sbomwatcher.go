@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"time"
@@ -18,6 +19,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/pager"
+)
+
+// Bounded exponential backoff for SBOM events whose owning pod has not been
+// observed yet. Declared as vars (not consts) so tests can shorten them.
+var (
+	sbomRetryInitialDelay = 2 * time.Second
+	sbomRetryMaxDelay     = 60 * time.Second
+	sbomRetryMaxAttempts  = 5
 )
 
 // SBOMWatch watches and processes changes on SBOMs
@@ -169,6 +178,41 @@ func (wh *WatchHandler) HandleSBOMEvents(eventQueue *CooldownQueue, producedComm
 		}
 
 		if err := validateContainerData(containerData); err != nil {
+			if errors.Is(err, ErrMissingWlid) {
+				// The pod that owns this image hasn't been observed yet
+				// (initial-list race, or pod informer not yet warm). Re-enqueue
+				// with bounded exponential backoff rather than dispatch a scan
+				// command with an empty Wlid — kubevuln silently drops those
+				// from the platform submission path.
+				key := obj.ObjectMeta.Namespace + "/" + obj.ObjectMeta.Name
+				attempt := wh.sbomRetryAttempts.Get(key)
+				if attempt >= sbomRetryMaxAttempts {
+					wh.sbomRetryAttempts.Delete(key)
+					logger.L().Warning("dropping SBOM scan after exhausting retries waiting for Wlid",
+						helpers.String("name", obj.ObjectMeta.Name),
+						helpers.String("namespace", obj.ObjectMeta.Namespace),
+						helpers.String("imageID", containerData.ImageID),
+						helpers.Int("attempts", attempt))
+					errorCh <- err
+					continue
+				}
+				wh.sbomRetryAttempts.Set(key, attempt+1)
+				delay := sbomRetryBackoff(attempt)
+				logger.L().Debug("Wlid not yet known for SBOM, re-enqueueing",
+					helpers.String("name", obj.ObjectMeta.Name),
+					helpers.String("namespace", obj.ObjectMeta.Namespace),
+					helpers.String("imageID", containerData.ImageID),
+					helpers.Int("attempt", attempt+1),
+					helpers.String("delay", delay.String()))
+				go func(ev watch.Event, d time.Duration) {
+					time.Sleep(d)
+					if eventQueue.Closed() {
+						return
+					}
+					eventQueue.Enqueue(ev)
+				}(e, delay)
+				continue
+			}
 			logger.L().Error("failed to get container data from SBOM",
 				helpers.String("name", obj.ObjectMeta.Name),
 				helpers.String("namespace", obj.ObjectMeta.Namespace),
@@ -177,6 +221,8 @@ func (wh *WatchHandler) HandleSBOMEvents(eventQueue *CooldownQueue, producedComm
 			errorCh <- err
 			continue
 		}
+		// success: clear any retry bookkeeping for this SBOM
+		wh.sbomRetryAttempts.Delete(obj.ObjectMeta.Namespace + "/" + obj.ObjectMeta.Name)
 
 		cmd := &apis.Command{
 			Wlid:        containerData.Wlid,
@@ -225,5 +271,18 @@ func validateContainerData(containerData *utils.ContainerData) error {
 	if containerData.ImageTag == "" {
 		return ErrMissingImageTag
 	}
+	if containerData.Wlid == "" {
+		return ErrMissingWlid
+	}
 	return nil
+}
+
+// sbomRetryBackoff returns the delay before retry number `attempt` (0-indexed).
+// Doubles each time, capped at sbomRetryMaxDelay.
+func sbomRetryBackoff(attempt int) time.Duration {
+	d := sbomRetryInitialDelay << attempt
+	if d <= 0 || d > sbomRetryMaxDelay {
+		return sbomRetryMaxDelay
+	}
+	return d
 }
