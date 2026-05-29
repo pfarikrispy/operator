@@ -109,6 +109,7 @@ func (rule *R2001PortForward) ProcessEvent(event admission.Attributes, access ob
 			PodName:           event.GetName(),
 			Namespace:         event.GetNamespace(),
 			PodNamespace:      event.GetNamespace(),
+			PodUID:            string(pod.UID),
 			WorkloadName:      workloadName,
 			WorkloadNamespace: workloadNamespace,
 			WorkloadKind:      workloadKind,

@@ -57,6 +57,7 @@ func TestR2000(t *testing.T) {
 	assert.Equal(t, "test-node", result.GetRuntimeAlertK8sDetails().NodeName)
 	assert.Equal(t, "Exec to pod detected on pod test-pod", result.GetRuleAlert().RuleDescription)
 	assert.Equal(t, "test-pod", result.GetRuntimeAlertK8sDetails().PodName)
+	assert.Equal(t, "test-pod-uid-12345", result.GetRuntimeAlertK8sDetails().PodUID)
 	assert.Equal(t, "test-namespace", result.GetRuntimeAlertK8sDetails().Namespace)
 	assert.Equal(t, "containerd://abcdef1234567890", result.GetRuntimeAlertK8sDetails().ContainerID)
 	assert.Equal(t, "nginx:1.14.2", result.GetRuntimeAlertK8sDetails().Image)
@@ -107,6 +108,7 @@ func TestR2000_EmptyContainerName(t *testing.T) {
 	assert.Equal(t, "containerd://abcdef1234567890", result.GetRuntimeAlertK8sDetails().ContainerID)
 	// WorkloadUID should be populated even though container name was empty
 	assert.Equal(t, "test-replicaset-uid-12345", result.GetRuntimeAlertK8sDetails().WorkloadUID)
+	assert.Equal(t, "test-pod-uid-12345", result.GetRuntimeAlertK8sDetails().PodUID)
 	assert.Equal(t, "test-workload", result.GetRuntimeAlertK8sDetails().WorkloadName)
 	assert.Equal(t, "ReplicaSet", result.GetRuntimeAlertK8sDetails().WorkloadKind)
 	// Image fields should fall back to first container when container name is empty
