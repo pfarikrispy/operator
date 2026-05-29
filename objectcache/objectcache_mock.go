@@ -35,6 +35,7 @@ func initializeClient(client kubernetes.Interface) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-pod",
 			Namespace: "test-namespace",
+			UID:       types.UID("test-pod-uid-12345"),
 			Labels: map[string]string{
 				"app":        "test-app",
 				"workload":   "test-workload",

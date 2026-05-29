@@ -131,6 +131,7 @@ func (rule *R2000ExecToPod) ProcessEvent(event admission.Attributes, access obje
 			PodName:           event.GetName(),
 			PodNamespace:      event.GetNamespace(),
 			Namespace:         event.GetNamespace(),
+			PodUID:            string(pod.UID),
 			WorkloadName:      workloadName,
 			WorkloadNamespace: workloadNamespace,
 			WorkloadKind:      workloadKind,

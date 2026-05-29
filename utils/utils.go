@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -178,6 +179,10 @@ func getImageFromSpec(instanceID instanceidhandler.IInstanceID, containers []cor
 // GetClusterUID retrieves the UID of the kube-system namespace to use as a stable cluster identifier.
 // If the namespace cannot be accessed (e.g., due to RBAC restrictions), it returns an empty string and logs a warning.
 func GetClusterUID(k8sClient kubernetes.Interface) string {
+	if envUID := os.Getenv("CLUSTER_UID"); envUID != "" {
+		logger.L().Info("retrieved ClusterUID from environment variable CLUSTER_UID", helpers.String("clusterUID", envUID))
+		return envUID
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	namespace, err := k8sClient.CoreV1().Namespaces().Get(ctx, "kube-system", metav1.GetOptions{})
