@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/armosec/armoapi-go/apis"
 	"github.com/kubescape/go-logger"
@@ -31,6 +32,16 @@ func (actionHandler *ActionHandler) handleOperatorAction(ctx context.Context) er
 	}
 	if args.Action == "" {
 		return fmt.Errorf("operatorAction: missing 'action'")
+	}
+
+	// TTL drives automatic revert, which is a later phase. Don't silently accept
+	// it: a caller that sets a ttl would wrongly assume an auto-revert is
+	// scheduled, when Phase 1 does nothing with it.
+	if args.TTL != "" {
+		if _, err := time.ParseDuration(args.TTL); err != nil {
+			return fmt.Errorf("operatorAction: invalid ttl %q: %w", args.TTL, err)
+		}
+		return fmt.Errorf("operatorAction: ttl/auto-revert is not supported yet (later phase); omit ttl")
 	}
 
 	// Phase 1 ships explicit-target actions only. Findings-driven Selector

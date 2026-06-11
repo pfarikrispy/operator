@@ -164,3 +164,30 @@ func TestHandleOperatorAction_UnknownAction(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown action")
 }
+
+// A malformed ttl must be rejected up front, not trusted (see armoapi-go#655).
+func TestHandleOperatorAction_InvalidTTLRejected(t *testing.T) {
+	client := k8sfake.NewClientset()
+	ah := newActionHandlerForTest(t, client, newTestConfig(config.Config{Namespace: "kubescape"}), apis.OperatorActionArgs{
+		Action: apis.OperatorActionAnnotate,
+		Target: &apis.OperatorActionTarget{Kind: "Deployment", Namespace: "payments", Name: "api"},
+		TTL:    "banana",
+	})
+	err := ah.handleOperatorAction(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid ttl")
+}
+
+// A well-formed ttl must still be fenced (auto-revert is a later phase) rather
+// than silently accepted, so a caller is not misled into expecting auto-revert.
+func TestHandleOperatorAction_ValidTTLNotYetSupported(t *testing.T) {
+	client := k8sfake.NewClientset(&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: "payments", Name: "api"}})
+	ah := newActionHandlerForTest(t, client, newTestConfig(config.Config{Namespace: "kubescape"}), apis.OperatorActionArgs{
+		Action: apis.OperatorActionAnnotate,
+		Target: &apis.OperatorActionTarget{Kind: "Deployment", Namespace: "payments", Name: "api"},
+		TTL:    "24h",
+	})
+	err := ah.handleOperatorAction(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ttl/auto-revert is not supported yet")
+}
