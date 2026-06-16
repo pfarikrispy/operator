@@ -284,3 +284,42 @@ func TestRetainOnly(t *testing.T) {
 		t.Errorf("after RetainOnly(nil): ProgramCacheSize = %d, want 0", size)
 	}
 }
+
+// TestCompileFailure_ReturnsErrorEveryCall verifies that a broken CEL
+// expression surfaces a compilation error on every evaluation, not just the
+// first one. The previous implementation cached compile failures as nil and
+// silently treated them as "no match", hiding misconfigured rules from
+// operators.
+func TestCompileFailure_ReturnsErrorEveryCall(t *testing.T) {
+	engine, err := NewAdmissionCEL()
+	if err != nil {
+		t.Fatalf("NewAdmissionCEL: %v", err)
+	}
+	event := newExecEvent()
+	ctx := engine.CreateEvalContext(event)
+
+	// Syntactically invalid CEL — cannot compile.
+	badExpr := `event.Kind === "Pod"` // CEL has no === operator
+	exprs := []armotypes.RuleExpression{
+		{EventType: armotypes.EventTypeK8sAdmission, Expression: badExpr},
+	}
+
+	for i := 0; i < 3; i++ {
+		_, err := engine.EvaluateRuleWithContext(ctx, armotypes.EventTypeK8sAdmission, exprs)
+		if err == nil {
+			t.Fatalf("call %d: expected compile error, got nil — broken rules must not be silently ignored", i+1)
+		}
+	}
+
+	// Cache must contain exactly one entry (the failed compile is cached so we
+	// don't re-attempt every event), but every lookup must still return the
+	// error.
+	if size := engine.ProgramCacheSize(); size != 1 {
+		t.Errorf("ProgramCacheSize = %d after 3 failed evals, want 1 (one cached failure)", size)
+	}
+
+	// EvaluateStringExpression must follow the same contract.
+	if _, err := engine.EvaluateStringExpression(ctx, badExpr); err == nil {
+		t.Error("EvaluateStringExpression: expected compile error, got nil")
+	}
+}

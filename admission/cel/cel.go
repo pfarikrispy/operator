@@ -11,12 +11,21 @@ import (
 	"github.com/google/cel-go/ext"
 )
 
+// cachedProgram stores either a compiled CEL program or the compilation error
+// that prevented it. The error is cached intentionally so repeated evaluation
+// of a broken expression re-surfaces the failure rather than silently treating
+// it as "no match" — a misconfigured rule must be loud, not invisible.
+type cachedProgram struct {
+	prog cel.Program
+	err  error
+}
+
 // AdmissionCEL owns a CEL environment configured for evaluating expressions
 // against AdmissionCelEvent values. Compiled programs are cached so repeated
 // evaluation of the same expression avoids re-compilation.
 type AdmissionCEL struct {
 	env          *cel.Env
-	programCache map[string]cel.Program
+	programCache map[string]cachedProgram
 	cacheMu      sync.RWMutex
 }
 
@@ -39,6 +48,10 @@ func NewAdmissionCEL() (*AdmissionCEL, error) {
 		cel.Variable("object", cel.MapType(cel.StringType, cel.DynType)),
 		cel.Variable("oldObject", cel.MapType(cel.StringType, cel.DynType)),
 		cel.Variable("options", cel.MapType(cel.StringType, cel.DynType)),
+		// Per-binding parameter overrides (RuntimeAlertRuleBindingRule.Parameters).
+		// Rules can reference these as params["key"]. Always present (empty map
+		// when no binding parameters apply) so expressions remain compilable.
+		cel.Variable("params", cel.MapType(cel.StringType, cel.DynType)),
 		ext.Strings(),
 	)
 	if err != nil {
@@ -46,7 +59,7 @@ func NewAdmissionCEL() (*AdmissionCEL, error) {
 	}
 	return &AdmissionCEL{
 		env:          env,
-		programCache: make(map[string]cel.Program),
+		programCache: make(map[string]cachedProgram),
 	}, nil
 }
 
@@ -55,10 +68,15 @@ func NewAdmissionCEL() (*AdmissionCEL, error) {
 // calls for the same event. The map fields (Object, OldObject, Options) are
 // injected as separate top-level variables because cel-go's native type system
 // does not support map[string]interface{} struct fields.
+//
+// The "params" key is initialized to an empty map. The evaluator overrides it
+// with the active binding's parameters before evaluating each rule, so a
+// single context can serve multiple rules with different parameter sets.
 func (c *AdmissionCEL) CreateEvalContext(event *AdmissionCelEvent) map[string]any {
 	ctx := map[string]any{
 		"event":     event,
 		"eventType": string(armotypes.EventTypeK8sAdmission),
+		"params":    map[string]any{},
 	}
 	if event.Object != nil {
 		ctx["object"] = event.Object
@@ -95,10 +113,6 @@ func (c *AdmissionCEL) EvaluateRuleWithContext(evalContext map[string]any, event
 		if err != nil {
 			return false, err
 		}
-		// nil means the program was previously cached as a compile failure.
-		if out == nil {
-			return false, nil
-		}
 
 		boolVal, ok := out.Value().(bool)
 		if !ok {
@@ -121,9 +135,6 @@ func (c *AdmissionCEL) EvaluateStringExpression(evalContext map[string]any, expr
 	out, err := c.evaluateProgram(expression, evalContext)
 	if err != nil {
 		return "", err
-	}
-	if out == nil {
-		return "", nil
 	}
 	strVal, ok := out.Value().(string)
 	if !ok {
@@ -162,14 +173,12 @@ func (c *AdmissionCEL) RetainOnly(activeExpressions []string) {
 }
 
 // evaluateProgram compiles (or retrieves from cache) and evaluates a CEL
-// expression against the provided context.
+// expression against the provided context. Cached compile failures are
+// returned as errors on every call — never silently swallowed.
 func (c *AdmissionCEL) evaluateProgram(expression string, evalContext map[string]any) (ref.Val, error) {
 	prog, err := c.getOrCreateProgram(expression)
 	if err != nil {
 		return nil, err
-	}
-	if prog == nil {
-		return nil, nil
 	}
 
 	out, _, err := prog.Eval(evalContext)
@@ -179,13 +188,15 @@ func (c *AdmissionCEL) evaluateProgram(expression string, evalContext map[string
 	return out, nil
 }
 
-// getOrCreateProgram returns a cached program or compiles one. On compilation
-// failure the error is returned and nil is cached to prevent repeated attempts.
+// getOrCreateProgram returns a cached program or compiles one. Compile errors
+// are cached and re-returned on every subsequent call for the same expression:
+// a broken rule should fail loudly on every event, not be silently ignored
+// after the first attempt.
 func (c *AdmissionCEL) getOrCreateProgram(expression string) (cel.Program, error) {
 	c.cacheMu.RLock()
-	if prog, exists := c.programCache[expression]; exists {
+	if cp, exists := c.programCache[expression]; exists {
 		c.cacheMu.RUnlock()
-		return prog, nil
+		return cp.prog, cp.err
 	}
 	c.cacheMu.RUnlock()
 
@@ -197,22 +208,24 @@ func (c *AdmissionCEL) compileAndCache(expression string) (cel.Program, error) {
 	defer c.cacheMu.Unlock()
 
 	// Double-check after acquiring write lock.
-	if prog, exists := c.programCache[expression]; exists {
-		return prog, nil
+	if cp, exists := c.programCache[expression]; exists {
+		return cp.prog, cp.err
 	}
 
 	ast, issues := c.env.Compile(expression)
-	if issues != nil {
-		c.programCache[expression] = nil
-		return nil, fmt.Errorf("compiling expression %q: %w", expression, issues.Err())
+	if issues != nil && issues.Err() != nil {
+		err := fmt.Errorf("compiling expression %q: %w", expression, issues.Err())
+		c.programCache[expression] = cachedProgram{err: err}
+		return nil, err
 	}
 
 	prog, err := c.env.Program(ast, cel.EvalOptions(cel.OptOptimize))
 	if err != nil {
-		c.programCache[expression] = nil
-		return nil, fmt.Errorf("creating program for %q: %w", expression, err)
+		wrapped := fmt.Errorf("creating program for %q: %w", expression, err)
+		c.programCache[expression] = cachedProgram{err: wrapped}
+		return nil, wrapped
 	}
 
-	c.programCache[expression] = prog
+	c.programCache[expression] = cachedProgram{prog: prog}
 	return prog, nil
 }
