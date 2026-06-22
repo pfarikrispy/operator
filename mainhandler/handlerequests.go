@@ -186,6 +186,11 @@ func (mainHandler *MainHandler) handleRequest(j utils.Job) {
 
 	case apis.TypeSetVulnScanCronJob, apis.TypeDeleteVulnScanCronJob, apis.TypeUpdateVulnScanCronJob:
 		isToItemizeScopeCommand = false
+
+	case apis.TypeOperatorAction:
+		// operator actions carry their own target (Args.target / Args.selector),
+		// so they are handled as a single request rather than itemized per pod.
+		isToItemizeScopeCommand = false
 	}
 
 	if isToItemizeScopeCommand {
@@ -246,6 +251,8 @@ func (actionHandler *ActionHandler) runCommand(ctx context.Context) error {
 		return actionHandler.deleteVulnScanCronJob(ctx)
 	case apis.TypeScanRegistryV2:
 		return actionHandler.scanRegistriesV2AndUpdateStatus(ctx)
+	case apis.TypeOperatorAction:
+		return actionHandler.handleOperatorAction(ctx)
 	default:
 		logger.L().Ctx(ctx).Error(fmt.Sprintf("Command %s not found", c.CommandName))
 	}
