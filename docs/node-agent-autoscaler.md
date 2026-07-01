@@ -79,6 +79,53 @@ annotations:
   argocd.argoproj.io/sync-options: Prune=false
 ```
 
+**Node Targeting:**
+
+Each DaemonSet selects the nodes it runs on based on the grouping label:
+
+- **Normal groups** use a `nodeSelector` matching the grouping label value, e.g.
+  `node.kubernetes.io/instance-type: m5.large`.
+- **The default group** (`IsDefaultGroup`) targets nodes that are *missing* the
+  grouping label. A `nodeSelector` cannot match an absent label, so its template
+  branch instead uses a `DoesNotExist` node affinity:
+
+  ```yaml
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: <NodeGroupLabelKey>   # the configured grouping label key
+            operator: DoesNotExist
+  ```
+
+  This ensures a `node-agent` is deployed on label-less nodes (on-prem / custom
+  clusters) without requiring the cluster operator to label nodes manually. The
+  branch is driven by `IsDefaultGroup` in the template data; the DaemonSet
+  template must therefore include both branches. Both the `nodeSelector` and this
+  affinity key off `NodeGroupLabelKey` (the operator's configured grouping label),
+  so they always match the label the operator actually groups by — even when it is
+  overridden from the default `node.kubernetes.io/instance-type`.
+
+The default group affinity carries **only** the `DoesNotExist` term; its OS
+requirement is already enforced by the `nodeSelector`. Non-default groups are not
+given an operator-managed affinity at all, so any user-provided `nodeAgent.affinity`
+(zone / GPU / topology constraints) is preserved for them.
+
+The label-less population is tracked under an internal sentinel key, so a node
+that legitimately carries `<groupingLabel>=<defaultNodeGroup>` forms its own
+normal (nodeSelector-targeted) group and is never merged into the affinity-based
+default group.
+
+> **Edge case — shared `kubescape.io/node-group` value.** In the unlikely event a
+> node is *labelled* `<groupingLabel>=<defaultNodeGroup>` while other nodes lack
+> the label, the real group and the synthetic default group both render their
+> `kubescape.io/node-group` selector value as `<defaultNodeGroup>`, so the two
+> DaemonSets share a pod selector. This is safe in practice — their node targeting
+> is mutually exclusive (label-present vs. absent) and `ownerReferences` prevent
+> pod adoption across them — but `kubectl get pods -l kubescape.io/node-group=…`
+> will list both groups' pods together.
+
 ### NodeGrouper (`nodegrouper.go`)
 
 Handles node discovery and resource calculation.
@@ -109,6 +156,15 @@ func calculatePercentage(q resource.Quantity, percent int) resource.Quantity {
 }
 ```
 
+**Representative allocatable per group:**
+
+Instance-type groups are homogeneous by definition, so a group's allocatable is
+taken from the first node seen. The **default group** is the exception: label-less
+nodes can be heterogeneous (mixed on-prem/bare-metal hardware), so it is sized off
+the **minimum** allocatable CPU/memory across its nodes. This guarantees the
+node-agent's requests fit every node in the group and makes the result independent
+of the (unstable) node list order.
+
 **Naming Collision Detection:**
 
 Different label values can sanitize to the same name (e.g., `m5.large` and `m5_large` both become `m5-large`). The autoscaler detects this and adds a short hash suffix:
@@ -137,9 +193,11 @@ Manages DaemonSet template loading and rendering.
 
 ```go
 type TemplateData struct {
-    Name           string            // e.g., "node-agent-m5-large"
-    NodeGroupLabel string            // e.g., "m5.large"
-    Resources      TemplateResources // Requests and limits
+    Name              string            // e.g., "node-agent-m5-large"
+    NodeGroupLabel    string            // the group's label value, e.g., "m5.large"
+    NodeGroupLabelKey string            // the configured grouping label key, e.g., "node.kubernetes.io/instance-type"
+    IsDefaultGroup    bool              // true for the fallback group of label-less nodes
+    Resources         TemplateResources // Requests and limits
 }
 
 type TemplateResources struct {
@@ -193,6 +251,7 @@ The autoscaler is configured via the operator's ConfigMap:
 type NodeAgentAutoscalerConfig struct {
     Enabled             bool          // Enable/disable autoscaler
     NodeGroupLabel      string        // Label to group nodes by
+    DefaultNodeGroup    string        // Group value for nodes missing NodeGroupLabel (default: "default"; empty = skip)
     ResourcePercentages struct {
         RequestCPU    int  // % of allocatable CPU for requests
         RequestMemory int  // % of allocatable memory for requests
@@ -295,7 +354,8 @@ kubectl get events -n kubescape --field-selector reason=Created,reason=Deleted
 
 | Scenario | Behavior |
 |----------|----------|
-| Node missing group label | Log error, skip node (no DaemonSet for it) |
+| Node missing group label (`DefaultNodeGroup` set) | Assign node to the default group (targeted via `DoesNotExist` affinity) so a node-agent is still deployed |
+| Node missing group label (`DefaultNodeGroup` empty) | Log error, skip node (no DaemonSet for it) |
 | Template parse error | Fatal error on startup |
 | Template render error | Log error, skip node group |
 | API error (create/update/delete) | Log error, continue reconciliation |

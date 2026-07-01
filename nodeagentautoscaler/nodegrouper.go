@@ -16,6 +16,11 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
+// defaultGroupKey is the internal map key for the fallback group of label-less
+// nodes. The leading NUL byte makes it impossible to clash with a real Kubernetes
+// label value, so the fallback population is never merged with a real group.
+const defaultGroupKey = "\x00default-node-group"
+
 // NodeGroup represents a group of nodes with the same label value
 type NodeGroup struct {
 	// LabelValue is the value of the grouping label (e.g., "m5.large")
@@ -28,6 +33,10 @@ type NodeGroup struct {
 	AllocatableMemory resource.Quantity
 	// NodeCount is the number of nodes in this group
 	NodeCount int
+	// IsDefault is true when this group was formed from nodes missing the
+	// NodeGroupLabel. Such a group cannot be targeted by a nodeSelector on the
+	// (absent) label, so its DaemonSet uses a "DoesNotExist" node affinity instead.
+	IsDefault bool
 }
 
 // CalculatedResources represents the calculated resource requests and limits
@@ -75,25 +84,55 @@ func (ng *NodeGrouper) GetNodeGroups(ctx context.Context) ([]NodeGroup, error) {
 		}
 
 		labelValue, ok := node.Labels[ng.config.NodeGroupLabel]
+		isDefault := false
+		// groupKey buckets nodes. For labelled nodes it is the label value. For
+		// label-less nodes it is a sentinel that cannot be a valid label value, so the
+		// fallback population is never merged with a real group whose value happens to
+		// equal DefaultNodeGroup (e.g. a node legitimately labelled "...=default").
+		groupKey := labelValue
 		if !ok {
-			// If label doesn't exist, log an error and skip this node
-			// Cloud managed Kubernetes (AKS, EKS, GKE) populate this field automatically
-			// For on-prem or custom clusters, the infrastructure must be configured to set this label
-			logger.L().Ctx(ctx).Error("node missing required label for autoscaler, node-agent will not be deployed on this node",
+			// Cloud managed Kubernetes (AKS, EKS, GKE) populate this field automatically.
+			// For on-prem or custom clusters the label may be absent, so fall back to the
+			// configured default group to ensure a node-agent is still deployed on this node.
+			if ng.config.DefaultNodeGroup == "" {
+				// Default group disabled: preserve the strict behavior and skip the node.
+				logger.L().Ctx(ctx).Error("node missing required label for autoscaler, node-agent will not be deployed on this node",
+					helpers.String("node", node.Name),
+					helpers.String("requiredLabel", ng.config.NodeGroupLabel))
+				continue
+			}
+			logger.L().Debug("node missing node group label, assigning default node group",
 				helpers.String("node", node.Name),
-				helpers.String("requiredLabel", ng.config.NodeGroupLabel))
-			continue
+				helpers.String("requiredLabel", ng.config.NodeGroupLabel),
+				helpers.String("defaultNodeGroup", ng.config.DefaultNodeGroup))
+			labelValue = ng.config.DefaultNodeGroup
+			groupKey = defaultGroupKey
+			isDefault = true
 		}
 
-		if group, exists := groupMap[labelValue]; exists {
+		if group, exists := groupMap[groupKey]; exists {
 			group.NodeCount++
+			if group.IsDefault {
+				// Instance-type groups are homogeneous, so the first node is
+				// representative. The default group is the opposite: label-less nodes
+				// can be wildly heterogeneous (on-prem mixed hardware). Size it off the
+				// minimum allocatable across its nodes so requests fit every node and
+				// the result is independent of (unstable) node list order.
+				if nodeCPU := *node.Status.Allocatable.Cpu(); nodeCPU.Cmp(group.AllocatableCPU) < 0 {
+					group.AllocatableCPU = nodeCPU
+				}
+				if nodeMem := *node.Status.Allocatable.Memory(); nodeMem.Cmp(group.AllocatableMemory) < 0 {
+					group.AllocatableMemory = nodeMem
+				}
+			}
 		} else {
-			groupMap[labelValue] = &NodeGroup{
+			groupMap[groupKey] = &NodeGroup{
 				LabelValue:        labelValue,
 				SanitizedName:     sanitizeName(labelValue),
 				AllocatableCPU:    *node.Status.Allocatable.Cpu(),
 				AllocatableMemory: *node.Status.Allocatable.Memory(),
 				NodeCount:         1,
+				IsDefault:         isDefault,
 			}
 		}
 	}
@@ -235,8 +274,13 @@ func resolveNameCollisions(groups []NodeGroup) []NodeGroup {
 				helpers.Int("collisionCount", len(indices)))
 
 			for _, idx := range indices {
-				hash := shortHash(groups[idx].LabelValue)
-				groups[idx].SanitizedName = sanitized + "-" + hash
+				// Salt the fallback group so it cannot hash to the same suffix as a
+				// real group sharing its LabelValue (e.g. a node labelled "...=default").
+				hashInput := groups[idx].LabelValue
+				if groups[idx].IsDefault {
+					hashInput = defaultGroupKey + hashInput
+				}
+				groups[idx].SanitizedName = sanitized + "-" + shortHash(hashInput)
 			}
 		}
 	}
@@ -259,4 +303,3 @@ func isNodeReady(node *corev1.Node) bool {
 	}
 	return false
 }
-

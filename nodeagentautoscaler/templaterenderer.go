@@ -23,6 +23,15 @@ type TemplateData struct {
 	Name string
 	// NodeGroupLabel is the value of the node group label
 	NodeGroupLabel string
+	// NodeGroupLabelKey is the configured grouping label key (e.g.
+	// "node.kubernetes.io/instance-type"). The template keys both the nodeSelector
+	// and the default group's affinity off this so they always match the operator's
+	// actual grouping label, even when it is overridden.
+	NodeGroupLabelKey string
+	// IsDefaultGroup is true for the fallback group of nodes that do not carry the
+	// grouping label. The template should select these nodes via a "DoesNotExist"
+	// node affinity rather than a nodeSelector matching NodeGroupLabel.
+	IsDefaultGroup bool
 	// Resources contains the calculated resource requests and limits
 	Resources TemplateResources
 	// GoMemLimit is the GOMEMLIMIT value derived from the memory limit and percentage (e.g., "360MiB")
@@ -49,10 +58,11 @@ type TemplateRenderer struct {
 	watcher              *fsnotify.Watcher
 	stopCh               chan struct{}
 	goMemLimitPercentage float64
+	nodeGroupLabelKey    string // configured grouping label key, exposed to the template
 }
 
 // NewTemplateRenderer creates a new TemplateRenderer
-func NewTemplateRenderer(templatePath string, goMemLimitPercentage float64) (*TemplateRenderer, error) {
+func NewTemplateRenderer(templatePath string, goMemLimitPercentage float64, nodeGroupLabelKey string) (*TemplateRenderer, error) {
 	if goMemLimitPercentage <= 0 || goMemLimitPercentage > 1.0 {
 		return nil, fmt.Errorf("goMemLimitPercentage %v is out of valid range (0, 1.0]", goMemLimitPercentage)
 	}
@@ -60,6 +70,7 @@ func NewTemplateRenderer(templatePath string, goMemLimitPercentage float64) (*Te
 	tr := &TemplateRenderer{
 		templatePath:         templatePath,
 		goMemLimitPercentage: goMemLimitPercentage,
+		nodeGroupLabelKey:    nodeGroupLabelKey,
 	}
 
 	if err := tr.loadTemplate(); err != nil {
@@ -212,8 +223,10 @@ func (tr *TemplateRenderer) RenderDaemonSet(group NodeGroup, resources Calculate
 	goMemLimitMiB := int64(float64(limitBytes) * tr.goMemLimitPercentage / (1024 * 1024))
 
 	data := TemplateData{
-		Name:           fmt.Sprintf("node-agent-%s", group.SanitizedName),
-		NodeGroupLabel: group.LabelValue,
+		Name:              fmt.Sprintf("node-agent-%s", group.SanitizedName),
+		NodeGroupLabel:    group.LabelValue,
+		NodeGroupLabelKey: tr.nodeGroupLabelKey,
+		IsDefaultGroup:    group.IsDefault,
 		Resources: TemplateResources{
 			Requests: TemplateResourcePair{
 				CPU:    resources.Requests.CPU.String(),
@@ -258,4 +271,3 @@ func (tr *TemplateRenderer) RenderDaemonSet(group NodeGroup, resources Calculate
 func GenerateDaemonSetName(group NodeGroup) string {
 	return fmt.Sprintf("node-agent-%s", group.SanitizedName)
 }
-

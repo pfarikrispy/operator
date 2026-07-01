@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -98,9 +99,21 @@ spec:
           limits:
             cpu: "{{ .Resources.Limits.CPU }}"
             memory: "{{ .Resources.Limits.Memory }}"
+{{- if .IsDefaultGroup }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: {{ .NodeGroupLabelKey }}
+                operator: DoesNotExist
       nodeSelector:
         kubernetes.io/os: linux
-        node.kubernetes.io/instance-type: "{{ .NodeGroupLabel }}"
+{{- else }}
+      nodeSelector:
+        kubernetes.io/os: linux
+        {{ .NodeGroupLabelKey }}: "{{ .NodeGroupLabel }}"
+{{- end }}
 `
 
 	// Create temp file
@@ -110,7 +123,7 @@ spec:
 	require.NoError(t, err)
 
 	// Create renderer
-	renderer, err := NewTemplateRenderer(templatePath, 0.8)
+	renderer, err := NewTemplateRenderer(templatePath, 0.8, "node.kubernetes.io/instance-type")
 	require.NoError(t, err)
 
 	// Test data
@@ -152,6 +165,90 @@ spec:
 	assert.Equal(t, "1Gi", container.Resources.Limits.Memory().String())
 }
 
+func TestTemplateRenderer_RenderDaemonSet_DefaultGroup(t *testing.T) {
+	// Template branches between a nodeSelector (normal groups) and a
+	// DoesNotExist node affinity (the default group of label-less nodes).
+	templateContent := `apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: "{{ .Name }}"
+  namespace: kubescape
+  labels:
+    kubescape.io/node-group: "{{ .NodeGroupLabel }}"
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: node-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: node-agent
+    spec:
+      containers:
+      - name: node-agent
+        image: "quay.io/kubescape/node-agent:v0.3.3"
+        resources:
+          requests:
+            cpu: "{{ .Resources.Requests.CPU }}"
+            memory: "{{ .Resources.Requests.Memory }}"
+          limits:
+            cpu: "{{ .Resources.Limits.CPU }}"
+            memory: "{{ .Resources.Limits.Memory }}"
+{{- if .IsDefaultGroup }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: {{ .NodeGroupLabelKey }}
+                operator: DoesNotExist
+      nodeSelector:
+        kubernetes.io/os: linux
+{{- else }}
+      nodeSelector:
+        kubernetes.io/os: linux
+        {{ .NodeGroupLabelKey }}: "{{ .NodeGroupLabel }}"
+{{- end }}
+`
+
+	tmpDir := t.TempDir()
+	templatePath := filepath.Join(tmpDir, "daemonset-template.yaml")
+	require.NoError(t, os.WriteFile(templatePath, []byte(templateContent), 0644))
+
+	renderer, err := NewTemplateRenderer(templatePath, 0.8, "node.kubernetes.io/instance-type")
+	require.NoError(t, err)
+
+	group := NodeGroup{
+		LabelValue:    "default",
+		SanitizedName: "default",
+		IsDefault:     true,
+	}
+	resources := CalculatedResources{
+		Requests: ResourcePair{CPU: resource.MustParse("100m"), Memory: resource.MustParse("200Mi")},
+		Limits:   ResourcePair{CPU: resource.MustParse("500m"), Memory: resource.MustParse("1Gi")},
+	}
+
+	ds, err := renderer.RenderDaemonSet(group, resources)
+	require.NoError(t, err)
+
+	assert.Equal(t, "node-agent-default", ds.Name)
+
+	// The default group must NOT pin to an instance-type value (the nodes lack the label).
+	assert.Equal(t, "linux", ds.Spec.Template.Spec.NodeSelector["kubernetes.io/os"])
+	assert.NotContains(t, ds.Spec.Template.Spec.NodeSelector, "node.kubernetes.io/instance-type")
+
+	// Instead it selects nodes where the grouping label does not exist.
+	require.NotNil(t, ds.Spec.Template.Spec.Affinity)
+	require.NotNil(t, ds.Spec.Template.Spec.Affinity.NodeAffinity)
+	terms := ds.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	require.NotNil(t, terms)
+	require.Len(t, terms.NodeSelectorTerms, 1)
+	require.Len(t, terms.NodeSelectorTerms[0].MatchExpressions, 1)
+	expr := terms.NodeSelectorTerms[0].MatchExpressions[0]
+	assert.Equal(t, "node.kubernetes.io/instance-type", expr.Key)
+	assert.Equal(t, corev1.NodeSelectorOpDoesNotExist, expr.Operator)
+}
+
 func TestTemplateRenderer_RenderDaemonSet_InvalidTemplate(t *testing.T) {
 	// Create an invalid template
 	tmpDir := t.TempDir()
@@ -160,7 +257,7 @@ func TestTemplateRenderer_RenderDaemonSet_InvalidTemplate(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should fail to create renderer
-	_, err = NewTemplateRenderer(templatePath, 0.8)
+	_, err = NewTemplateRenderer(templatePath, 0.8, "node.kubernetes.io/instance-type")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to parse template")
 }
@@ -182,14 +279,14 @@ func TestTemplateRenderer_NewTemplateRenderer_InvalidPercentage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewTemplateRenderer(templatePath, tt.percentage)
+			_, err := NewTemplateRenderer(templatePath, tt.percentage, "node.kubernetes.io/instance-type")
 			assert.Error(t, err)
 			assert.Contains(t, err.Error(), "out of valid range")
 		})
 	}
 
 	// Boundary: exactly 1.0 should be valid
-	_, err = NewTemplateRenderer(templatePath, 1.0)
+	_, err = NewTemplateRenderer(templatePath, 1.0, "node.kubernetes.io/instance-type")
 	assert.NoError(t, err)
 }
 
@@ -253,7 +350,7 @@ spec:
 	require.NoError(t, err)
 
 	// Create renderer
-	renderer, err := NewTemplateRenderer(templatePath, 0.8)
+	renderer, err := NewTemplateRenderer(templatePath, 0.8, "node.kubernetes.io/instance-type")
 	require.NoError(t, err)
 
 	group := NodeGroup{
@@ -359,7 +456,7 @@ spec:
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			renderer, err := NewTemplateRenderer(templatePath, tt.percentage)
+			renderer, err := NewTemplateRenderer(templatePath, tt.percentage, "node.kubernetes.io/instance-type")
 			require.NoError(t, err)
 
 			group := NodeGroup{LabelValue: "m5.large", SanitizedName: "m5-large"}
